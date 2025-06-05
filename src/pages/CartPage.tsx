@@ -6,12 +6,62 @@ import { Separator } from "@/components/ui/separator"
 import { ShoppingCart, Plus, Minus, Trash2, ArrowLeft } from "lucide-react"
 import { Link } from "react-router-dom"
 import { useCart } from "@/hooks/use-cart"
+import { gql, useQuery } from "@apollo/client"
+import { useMemo } from "react"
+
+// Requête GraphQL pour récupérer les méthodes d'expédition actives
+const GET_SHIPPING_METHODS = gql`
+  query GetShippingMethods {
+    activeShippingMethods {
+      id
+      code
+      name
+      description
+    }
+    activeOrder {
+      id
+      totalWithTax
+      shippingWithTax
+    }
+  }
+`
 
 export default function CartPage() {
   const { items, removeFromCart, updateQuantity, getTotalPrice, getTotalItems, clearCart } = useCart()
 
-  const shippingCost = getTotalPrice() >= 50 ? 0 : 4.99
+  // Configuration de base correspondant à votre configuration Vendure
+  const FREE_SHIPPING_THRESHOLD = 50 // 50€
+  const STANDARD_SHIPPING_COST = 4 // 4€
+
+  // Récupération des méthodes d'expédition depuis Vendure
+  const { data, loading, error } = useQuery(GET_SHIPPING_METHODS)
+
+  // Calcul des frais de livraison
+  const { shippingCost, shippingMethod } = useMemo(() => {
+    // Si nous avons une commande active avec des frais de livraison déjà calculés
+    if (data?.activeOrder?.shippingWithTax !== undefined) {
+      return {
+        shippingCost: data.activeOrder.shippingWithTax / 100, // Convertir de cents à euros
+        shippingMethod: data.activeShippingMethods?.find(m => m.code === 'standard-shipping')
+      }
+    }
+
+    // Sinon, on détermine les frais de livraison selon notre logique métier
+    const total = getTotalPrice()
+    const cost = total >= FREE_SHIPPING_THRESHOLD ? 0 : STANDARD_SHIPPING_COST
+
+    return {
+      shippingCost: cost,
+      shippingMethod: data?.activeShippingMethods?.[0] // Prend la première méthode disponible
+    }
+  }, [data, getTotalPrice])
+
   const totalWithShipping = getTotalPrice() + shippingCost
+  const amountUntilFreeShipping = FREE_SHIPPING_THRESHOLD - getTotalPrice()
+
+  if (error) {
+    console.error("Erreur lors du chargement des méthodes d'expédition:", error)
+  }
 
   if (items.length === 0) {
     return (
@@ -46,27 +96,43 @@ export default function CartPage() {
         {/* Liste des articles */}
         <div className="lg:col-span-2 space-y-4">
           {items.map((item) => (
-            <Card key={item.product.id}>
+            <Card key={`${item.product.id}-${item.variantId}`}>
               <CardContent className="p-6">
                 <div className="flex flex-col md:flex-row gap-4">
-                  <img
-                    src={`/placeholder.svg?height=120&width=120&text=${encodeURIComponent(item.product.name)}`}
-                    alt={item.product.name}
-                    className="w-full md:w-24 h-24 object-cover rounded"
-                  />
-
-                  <div className="flex-1">
-                    <h3 className="text-lg font-semibold mb-1">{item.product.name}</h3>
-                    <p className="text-gray-600 text-sm mb-2">{item.product.description}</p>
-                    <p className="text-lg font-bold text-blue-600">{item.product.price.toFixed(2)} €</p>
+                  {/* Image du produit */}
+                  <div className="w-full md:w-24 h-24">
+                    {item.product.image ? (
+                      <img
+                        src={item.product.image}
+                        alt={item.product.name}
+                        className="w-full h-full object-cover rounded"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gray-100 rounded flex items-center justify-center">
+                        <span className="text-gray-400 text-xs text-center">Aucune image</span>
+                      </div>
+                    )}
                   </div>
 
+                  {/* Détails du produit */}
+                  <div className="flex-1">
+                    <h3 className="text-lg font-semibold mb-1">{item.product.name}</h3>
+                    <p className="text-gray-600 text-sm mb-2 line-clamp-2">{item.product.description}</p>
+                    <p className="text-lg font-bold text-blue-600">
+                      {(item.product.price).toFixed(2)} €
+                    </p>
+                    {item.variantId && (
+                      <p className="text-xs text-gray-500 mt-1">Variante: {item.variantId}</p>
+                    )}
+                  </div>
+
+                  {/* Actions */}
                   <div className="flex flex-col items-end space-y-2">
                     <div className="flex items-center space-x-2">
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => updateQuantity(item.product.id, item.quantity - 1)}
+                        onClick={() => updateQuantity(item.product.id, item.quantity - 1, item.variantId)}
                         disabled={item.quantity <= 1}
                       >
                         <Minus className="h-4 w-4" />
@@ -75,19 +141,21 @@ export default function CartPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => updateQuantity(item.product.id, item.quantity + 1)}
+                        onClick={() => updateQuantity(item.product.id, item.quantity + 1, item.variantId)}
                         disabled={item.quantity >= item.product.stock}
                       >
                         <Plus className="h-4 w-4" />
                       </Button>
                     </div>
 
-                    <p className="text-lg font-bold">{(item.product.price * item.quantity).toFixed(2)} €</p>
+                    <p className="text-lg font-bold">
+                      {(item.product.price * item.quantity).toFixed(2)} €
+                    </p>
 
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => removeFromCart(item.product.id)}
+                      onClick={() => removeFromCart(item.product.id, item.variantId)}
                       className="text-red-600 hover:text-red-800"
                     >
                       <Trash2 className="h-4 w-4 mr-1" />
@@ -121,7 +189,9 @@ export default function CartPage() {
               <div className="flex justify-between">
                 <span>Frais de livraison</span>
                 <span>
-                  {shippingCost === 0 ? (
+                  {loading ? (
+                    <span className="text-gray-500">Calcul en cours...</span>
+                  ) : shippingCost === 0 ? (
                     <span className="text-green-600 font-semibold">Gratuit</span>
                   ) : (
                     `${shippingCost.toFixed(2)} €`
@@ -129,9 +199,18 @@ export default function CartPage() {
                 </span>
               </div>
 
-              {getTotalPrice() < 50 && (
+              {/* {shippingMethod && (
+                <div className="text-sm text-gray-600">
+                  <p>Méthode de livraison: {shippingMethod.name}</p>
+                  {shippingMethod.description && (
+                    <p className="text-xs mt-1">{shippingMethod.description}</p>
+                  )}
+                </div>
+              )} */}
+
+              {getTotalPrice() < FREE_SHIPPING_THRESHOLD && (
                 <p className="text-sm text-gray-600 bg-blue-50 p-3 rounded">
-                  Ajoutez {(50 - getTotalPrice()).toFixed(2)} € pour bénéficier de la livraison gratuite !
+                  Il vous manque {amountUntilFreeShipping.toFixed(2)} € pour bénéficier de la livraison gratuite !
                 </p>
               )}
 
@@ -139,12 +218,18 @@ export default function CartPage() {
 
               <div className="flex justify-between text-lg font-bold">
                 <span>Total</span>
-                <span>{totalWithShipping.toFixed(2)} €</span>
+                <span>
+                  {loading ? (
+                    <span className="text-gray-500">Calcul en cours...</span>
+                  ) : (
+                    `${totalWithShipping.toFixed(2)} €`
+                  )}
+                </span>
               </div>
 
               <Link to="/checkout" className="w-full">
-                <Button className="w-full" size="lg">
-                  Passer commande
+                <Button className="w-full" size="lg" disabled={loading}>
+                  {loading ? "Chargement..." : "Passer commande"}
                 </Button>
               </Link>
 
