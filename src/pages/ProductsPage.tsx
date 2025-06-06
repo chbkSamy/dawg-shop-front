@@ -7,6 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { ShoppingCart } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useCart } from "@/hooks/use-cart";
+import  Loader  from "@/components/loader.tsx";
 
 type SortOption = "name-asc" | "name-desc" | "price-asc" | "price-desc";
 
@@ -88,7 +89,7 @@ export default function ProductsPage() {
     });
   };
 
-  if (loading) return <p>Chargement...</p>;
+  if (loading) return <Loader />;
   if (error) {
     console.error("Erreur GraphQL:", error);
     return <p>Erreur lors du chargement des produits: {error.message}</p>;

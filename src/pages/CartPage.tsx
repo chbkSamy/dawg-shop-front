@@ -94,18 +94,21 @@ export default function CartPage() {
 
   const handleCreateOrder = async () => {
     try {
-      const result = await createOrder()
+      console.log("Tentative de création de commande...");
+      const result = await createOrder();
+      console.log("Résultat de la mutation:", result);
+
       if (result.data?.createOrder?.id) {
-        console.log("Commande créée dans CartPage:", result.data.createOrder.id)
-        // Actualiser les données après création
-        refetch()
+        console.log("Commande créée avec succès:", result.data.createOrder.id);
+        refetch();
       } else if (result.data?.createOrder?.errorCode) {
-        console.error("Erreur lors de la création de la commande:", result.data.createOrder.message)
+        console.error("Erreur lors de la création de la commande:", result.data.createOrder.message);
       }
     } catch (err) {
-      console.error("Erreur lors de la création de la commande:", err)
+      console.error("Erreur complète lors de la création de la commande:", err);
+      console.error("Stack trace:", err.stack);
     }
-  }
+  };
 
   // Fonction pour préparer une commande d'invité (optionnel, peut être déplacé vers checkout)
   const prepareGuestOrder = async (email: string) => {
@@ -242,9 +245,13 @@ export default function CartPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() =>
-                          updateQuantity(item.product.id, item.quantity - 1, item.variantId)
-                        }
+                        onClick={() => {
+                          if (item.variantId) {
+                            updateQuantity(item.product.id, item.quantity - 1, item.variantId)
+                          } else {
+                            updateQuantity(item.product.id, item.quantity - 1)
+                          }
+                        }}
                         disabled={item.quantity <= 1}
                       >
                         <Minus className="h-4 w-4" />
@@ -253,9 +260,13 @@ export default function CartPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() =>
-                          updateQuantity(item.product.id, item.quantity + 1, item.variantId)
-                        }
+                        onClick={() => {
+                          if (item.variantId) {
+                            updateQuantity(item.product.id, item.quantity + 1, item.variantId)
+                          } else {
+                            updateQuantity(item.product.id, item.quantity + 1)
+                          }
+                        }}
                         disabled={item.quantity >= item.product.stock}
                       >
                         <Plus className="h-4 w-4" />
@@ -269,7 +280,13 @@ export default function CartPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => removeFromCart(item.product.id, item.variantId)}
+                      onClick={() => {
+                        if (item.variantId) {
+                          removeFromCart(item.product.id, item.variantId)
+                        } else {
+                          removeFromCart(item.product.id)
+                        }
+                      }}
                       className="text-red-600 hover:text-red-800"
                     >
                       <Trash2 className="h-4 w-4 mr-1" />
