@@ -6,10 +6,10 @@ import { Separator } from "@/components/ui/separator"
 import { ShoppingCart, Plus, Minus, Trash2, ArrowLeft } from "lucide-react"
 import { Link } from "react-router-dom"
 import { useCart } from "@/hooks/use-cart"
-import { gql, useQuery } from "@apollo/client"
-import { useMemo } from "react"
+import { gql, useQuery, useMutation } from "@apollo/client"
+import { useMemo, useEffect } from "react"
 
-// Requête GraphQL pour récupérer les méthodes d'expédition actives
+// Requête GraphQL mise à jour pour gérer les commandes d'invités
 const GET_SHIPPING_METHODS = gql`
   query GetShippingMethods {
     activeShippingMethods {
@@ -20,8 +20,53 @@ const GET_SHIPPING_METHODS = gql`
     }
     activeOrder {
       id
+      code
+      state
       totalWithTax
       shippingWithTax
+      customer {
+        id
+        emailAddress
+      }
+    }
+  }
+`
+
+// Mutation pour créer une commande d'invité
+const CREATE_ORDER = gql`
+  mutation CreateOrder {
+    createOrder {
+      id
+      code
+      state
+      ... on Order {
+        id
+        code
+        state
+      }
+      ... on ErrorResult {
+        errorCode
+        message
+      }
+    }
+  }
+`
+
+// Mutation pour définir l'email de commande d'invité
+const SET_CUSTOMER_FOR_ORDER = gql`
+  mutation SetCustomerForOrder($input: CreateCustomerInput!) {
+    setCustomerForOrder(input: $input) {
+      ... on Order {
+        id
+        customer {
+          id
+          emailAddress
+        }
+      }
+      ... on ErrorResult {
+        errorCode
+        message
+      }
     }
   }
 `
@@ -29,30 +74,76 @@ const GET_SHIPPING_METHODS = gql`
 export default function CartPage() {
   const { items, removeFromCart, updateQuantity, getTotalPrice, getTotalItems, clearCart } = useCart()
 
-  // Configuration de base correspondant à votre configuration Vendure
+  // Seuil pour livraison gratuite
   const FREE_SHIPPING_THRESHOLD = 50 // 50€
   const STANDARD_SHIPPING_COST = 4 // 4€
 
-  // Récupération des méthodes d'expédition depuis Vendure
-  const { data, loading, error } = useQuery(GET_SHIPPING_METHODS)
+  // Queries et mutations GraphQL
+  const { data, loading, error, refetch } = useQuery(GET_SHIPPING_METHODS, {
+    errorPolicy: 'all' // Pour gérer les erreurs sans bloquer l'interface
+  })
+  const [createOrder] = useMutation(CREATE_ORDER)
+  const [setCustomerForOrder] = useMutation(SET_CUSTOMER_FOR_ORDER)
+
+  // Création automatique d'une commande si nécessaire
+  useEffect(() => {
+    if (!loading && !data?.activeOrder?.id && items.length > 0) {
+      handleCreateOrder()
+    }
+  }, [loading, data, items.length])
+
+  const handleCreateOrder = async () => {
+    try {
+      const result = await createOrder()
+      if (result.data?.createOrder?.id) {
+        console.log("Commande créée dans CartPage:", result.data.createOrder.id)
+        // Actualiser les données après création
+        refetch()
+      } else if (result.data?.createOrder?.errorCode) {
+        console.error("Erreur lors de la création de la commande:", result.data.createOrder.message)
+      }
+    } catch (err) {
+      console.error("Erreur lors de la création de la commande:", err)
+    }
+  }
+
+  // Fonction pour préparer une commande d'invité (optionnel, peut être déplacé vers checkout)
+  const prepareGuestOrder = async (email: string) => {
+    try {
+      const result = await setCustomerForOrder({
+        variables: {
+          input: {
+            emailAddress: email
+          }
+        }
+      })
+
+      if (result.data?.setCustomerForOrder?.id) {
+        console.log("Email défini pour la commande d'invité")
+        refetch()
+      }
+    } catch (err) {
+      console.error("Erreur lors de la définition de l'email:", err)
+    }
+  }
 
   // Calcul des frais de livraison
   const { shippingCost, shippingMethod } = useMemo(() => {
-    // Si nous avons une commande active avec des frais de livraison déjà calculés
+    // Si l'API Vendure renvoie déjà un activeOrder avec shippingWithTax, on l'utilise
     if (data?.activeOrder?.shippingWithTax !== undefined) {
       return {
-        shippingCost: data.activeOrder.shippingWithTax / 100, // Convertir de cents à euros
-        shippingMethod: data.activeShippingMethods?.find(m => m.code === 'standard-shipping')
+        shippingCost: data.activeOrder.shippingWithTax / 100,
+        shippingMethod: data.activeShippingMethods?.find(m => m.code === "standard-shipping")
       }
     }
 
-    // Sinon, on détermine les frais de livraison selon notre logique métier
+    // Sinon, on calcule localement selon le panier
     const total = getTotalPrice()
     const cost = total >= FREE_SHIPPING_THRESHOLD ? 0 : STANDARD_SHIPPING_COST
 
     return {
       shippingCost: cost,
-      shippingMethod: data?.activeShippingMethods?.[0] // Prend la première méthode disponible
+      shippingMethod: data?.activeShippingMethods?.[0] || null
     }
   }, [data, getTotalPrice])
 
@@ -60,9 +151,14 @@ export default function CartPage() {
   const amountUntilFreeShipping = FREE_SHIPPING_THRESHOLD - getTotalPrice()
 
   if (error) {
-    console.error("Erreur lors du chargement des méthodes d'expédition:", error)
+    console.error("Erreur lors du chargement des méthodes d'expédition :", error)
   }
 
+  // Vérifier l'état de la commande
+  const orderState = data?.activeOrder?.state
+  const isGuestOrder = data?.activeOrder && !data.activeOrder.customer?.id
+
+  // Si le panier est vide, on affiche un message dédié
   if (items.length === 0) {
     return (
       <div className="container mx-auto px-4 py-8">
@@ -92,6 +188,18 @@ export default function CartPage() {
         </h1>
       </div>
 
+      {/* Indicateur d'état de commande pour debug */}
+      {process.env.NODE_ENV === 'development' && data?.activeOrder && (
+        <div className="mb-4 p-3 bg-blue-50 rounded text-sm">
+          <p>Commande ID: {data.activeOrder.id}</p>
+          <p>État: {orderState}</p>
+          <p>Type: {isGuestOrder ? 'Invité' : 'Connecté'}</p>
+          {data.activeOrder.customer?.emailAddress && (
+            <p>Email: {data.activeOrder.customer.emailAddress}</p>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         {/* Liste des articles */}
         <div className="lg:col-span-2 space-y-4">
@@ -117,9 +225,11 @@ export default function CartPage() {
                   {/* Détails du produit */}
                   <div className="flex-1">
                     <h3 className="text-lg font-semibold mb-1">{item.product.name}</h3>
-                    <p className="text-gray-600 text-sm mb-2 line-clamp-2">{item.product.description}</p>
+                    <p className="text-gray-600 text-sm mb-2 line-clamp-2">
+                      {item.product.description}
+                    </p>
                     <p className="text-lg font-bold text-blue-600">
-                      {(item.product.price).toFixed(2)} €
+                      {item.product.price.toFixed(2)} €
                     </p>
                     {item.variantId && (
                       <p className="text-xs text-gray-500 mt-1">Variante: {item.variantId}</p>
@@ -132,7 +242,9 @@ export default function CartPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => updateQuantity(item.product.id, item.quantity - 1, item.variantId)}
+                        onClick={() =>
+                          updateQuantity(item.product.id, item.quantity - 1, item.variantId)
+                        }
                         disabled={item.quantity <= 1}
                       >
                         <Minus className="h-4 w-4" />
@@ -141,7 +253,9 @@ export default function CartPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => updateQuantity(item.product.id, item.quantity + 1, item.variantId)}
+                        onClick={() =>
+                          updateQuantity(item.product.id, item.quantity + 1, item.variantId)
+                        }
                         disabled={item.quantity >= item.product.stock}
                       >
                         <Plus className="h-4 w-4" />
@@ -199,18 +313,10 @@ export default function CartPage() {
                 </span>
               </div>
 
-              {/* {shippingMethod && (
-                <div className="text-sm text-gray-600">
-                  <p>Méthode de livraison: {shippingMethod.name}</p>
-                  {shippingMethod.description && (
-                    <p className="text-xs mt-1">{shippingMethod.description}</p>
-                  )}
-                </div>
-              )} */}
-
               {getTotalPrice() < FREE_SHIPPING_THRESHOLD && (
                 <p className="text-sm text-gray-600 bg-blue-50 p-3 rounded">
-                  Il vous manque {amountUntilFreeShipping.toFixed(2)} € pour bénéficier de la livraison gratuite !
+                  Il vous manque {amountUntilFreeShipping.toFixed(2)} € pour bénéficier de la
+                  livraison gratuite !
                 </p>
               )}
 
@@ -227,8 +333,19 @@ export default function CartPage() {
                 </span>
               </div>
 
+              {/* Information sur le checkout d'invité */}
+              {isGuestOrder && (
+                <p className="text-xs text-blue-600 bg-blue-50 p-2 rounded">
+                  💡 Vous pouvez finaliser votre commande sans créer de compte
+                </p>
+              )}
+
               <Link to="/checkout" className="w-full">
-                <Button className="w-full" size="lg" disabled={loading}>
+                <Button
+                  className="w-full"
+                  size="lg"
+                  disabled={loading || !data?.activeOrder?.id}
+                >
                   {loading ? "Chargement..." : "Passer commande"}
                 </Button>
               </Link>

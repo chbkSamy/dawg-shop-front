@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -10,25 +10,105 @@ import { Separator } from "@/components/ui/separator"
 import { ArrowLeft, ArrowRight, CreditCard, Truck } from "lucide-react"
 import { Link, useNavigate } from "react-router-dom"
 import { useCart } from "@/hooks/use-cart"
+import { gql, useMutation, useQuery } from "@apollo/client"
+import { useToast } from "@/hooks/use-toast"
 
-type CheckoutStep = "personal" | "shipping" | "payment" | "confirmation"
+const GET_ACTIVE_ORDER = gql`
+  query GetActiveOrder {
+    activeOrder {
+      id
+      code
+      totalWithTax
+      shippingWithTax
+      lines {
+        productVariant {
+          id
+          name
+          priceWithTax
+        }
+        quantity
+      }
+      customer {
+        id
+        emailAddress
+      }
+    }
+    eligibleShippingMethods {
+      id
+      name
+      description
+      priceWithTax
+    }
+    activeCustomer {
+      id
+      firstName
+      lastName
+      emailAddress
+    }
+  }
+`
 
-interface PersonalInfo {
-  firstName: string
-  lastName: string
-  email: string
-  phone: string
-  address: string
-  city: string
-  postalCode: string
-}
+const SET_CUSTOMER_FOR_ORDER = gql`
+  mutation SetCustomerForOrder($input: CreateCustomerInput!) {
+    setCustomerForOrder(input: $input) {
+      ... on Order {
+        id
+        customer {
+          id
+          firstName
+          lastName
+          emailAddress
+        }
+      }
+      ... on ErrorResult {
+        errorCode
+        message
+      }
+    }
+  }
+`
+
+const SET_SHIPPING_ADDRESS = gql`
+  mutation SetShippingAddress($orderId: ID!, $input: CreateAddressInput!) {
+    setOrderShippingAddress(orderId: $orderId, input: $input) {
+      id
+      shippingAddress {
+        fullName
+        streetLine1
+        city
+        postalCode
+        country {
+          name
+        }
+      }
+    }
+  }
+`
+
+const SET_SHIPPING_METHOD = gql`
+  mutation SetShippingMethod($orderId: ID!, $shippingMethodIds: [ID!]!) {
+    setOrderShippingMethod(orderId: $orderId, shippingMethodIds: $shippingMethodIds) {
+      id
+    }
+  }
+`
+
+const ADD_PAYMENT_TO_ORDER = gql`
+  mutation AddPaymentToOrder($input: PaymentInput!) {
+    addPaymentToOrder(input: $input) {
+      id
+      state
+    }
+  }
+`
 
 export default function CheckoutPage() {
   const navigate = useNavigate()
+  const { toast } = useToast()
   const { items, getTotalPrice, clearCart } = useCart()
-  const [currentStep, setCurrentStep] = useState<CheckoutStep>("personal")
-  const [shippingMethod, setShippingMethod] = useState("standard")
-  const [personalInfo, setPersonalInfo] = useState<PersonalInfo>({
+  const [currentStep, setCurrentStep] = useState("personal")
+  const [shippingMethod, setShippingMethod] = useState(null)
+  const [personalInfo, setPersonalInfo] = useState({
     firstName: "",
     lastName: "",
     email: "",
@@ -36,60 +116,121 @@ export default function CheckoutPage() {
     address: "",
     city: "",
     postalCode: "",
+    country: "France"
   })
+  const [orderId, setOrderId] = useState(null)
 
-  const shippingCost = getTotalPrice() >= 50 ? 0 : 4.99
-  const totalWithShipping = getTotalPrice() + shippingCost
+  const { data, loading, error, refetch } = useQuery(GET_ACTIVE_ORDER)
+  const [setCustomer] = useMutation(SET_CUSTOMER_FOR_ORDER)
+  const [setShippingAddress] = useMutation(SET_SHIPPING_ADDRESS)
+  const [setShippingMethodMutation] = useMutation(SET_SHIPPING_METHOD)
+  const [addPayment] = useMutation(ADD_PAYMENT_TO_ORDER)
 
-  const handlePersonalInfoChange = (field: keyof PersonalInfo, value: string) => {
-    setPersonalInfo((prev) => ({ ...prev, [field]: value }))
+  useEffect(() => {
+    if (data?.activeOrder?.id) {
+      setOrderId(data.activeOrder.id)
+    }
+  }, [data])
+
+  const { shippingCost, totalWithShipping } = useMemo(() => {
+    const cost = data?.activeOrder?.shippingWithTax ?? 0
+    const subtotal = getTotalPrice() * 100
+    return {
+      shippingCost: cost / 100,
+      totalWithShipping: (subtotal + cost) / 100
+    }
+  }, [data, getTotalPrice])
+
+  const handlePersonalInfoChange = (field, value) => {
+    setPersonalInfo(prev => ({ ...prev, [field]: value }))
   }
 
-  const validatePersonalInfo = () => {
-    return Object.values(personalInfo).every((value) => value.trim() !== "")
-  }
-
-  const handleNextStep = () => {
-    if (currentStep === "personal" && !validatePersonalInfo()) {
-      alert("Veuillez remplir tous les champs obligatoires")
-      return
+  const handleNextStep = async () => {
+    if (currentStep === "personal") {
+      const allFilled = Object.values(personalInfo).every(v => v.trim() !== "")
+      if (!allFilled) {
+        toast({ title: "Champs manquants", description: "Veuillez remplir tous les champs." })
+        return
+      }
     }
 
-    const steps: CheckoutStep[] = ["personal", "shipping", "payment", "confirmation"]
-    const currentIndex = steps.indexOf(currentStep)
-    if (currentIndex < steps.length - 1) {
-      setCurrentStep(steps[currentIndex + 1])
+    if (currentStep === "shipping" && orderId) {
+      try {
+        if (data?.activeCustomer?.id) {
+          await setCustomer({
+            variables: { input: { emailAddress: data.activeCustomer.emailAddress } }
+          })
+        } else {
+          await setCustomer({
+            variables: {
+              input: {
+                emailAddress: personalInfo.email,
+                firstName: personalInfo.firstName,
+                lastName: personalInfo.lastName
+              }
+            }
+          })
+        }
+
+        await setShippingAddress({
+          variables: {
+            orderId,
+            input: {
+              fullName: `${personalInfo.firstName} ${personalInfo.lastName}`,
+              streetLine1: personalInfo.address,
+              city: personalInfo.city,
+              postalCode: personalInfo.postalCode,
+              countryCode: "FR"
+            }
+          }
+        })
+
+        if (shippingMethod) {
+          await setShippingMethodMutation({
+            variables: { orderId, shippingMethodIds: [shippingMethod] }
+          })
+        }
+      } catch (err) {
+        toast({ title: "Erreur", description: "Échec de la mise à jour de la commande" })
+        return
+      }
     }
+
+    const steps = ["personal", "shipping", "payment", "confirmation"]
+    const next = steps[steps.indexOf(currentStep) + 1]
+    setCurrentStep(next)
   }
 
   const handlePreviousStep = () => {
-    const steps: CheckoutStep[] = ["personal", "shipping", "payment", "confirmation"]
+    const steps = ["personal", "shipping", "payment", "confirmation"]
     const currentIndex = steps.indexOf(currentStep)
     if (currentIndex > 0) {
       setCurrentStep(steps[currentIndex - 1])
     }
   }
 
-  const handlePayment = () => {
-    // Simulation du paiement
-    setTimeout(() => {
-      clearCart()
-      navigate("/order-confirmation")
-    }, 2000)
+  const handlePayment = async () => {
+    if (!orderId) return
+    try {
+      const { data: paymentData } = await addPayment({
+        variables: {
+          input: {
+            method: "dummy-payment-method",
+            metadata: { paymentMethod: "dummy", orderId }
+          }
+        }
+      })
+      if (paymentData?.addPaymentToOrder?.state === "PaymentSettled") {
+        toast({ title: "Paiement réussi" })
+        clearCart()
+        navigate("/order-confirmation")
+      } else {
+        toast({ title: "Paiement refusé" })
+      }
+    } catch (err) {
+      toast({ title: "Erreur paiement", description: err.message })
+    }
   }
-
-  if (items.length === 0) {
-    return (
-      <div className="container mx-auto px-4 py-8 text-center">
-        <h1 className="text-2xl font-bold mb-4">Votre panier est vide</h1>
-        <p className="text-gray-600 mb-8">Ajoutez des produits à votre panier pour continuer.</p>
-        <Link to="/products">
-          <Button>Découvrir nos produits</Button>
-        </Link>
-      </div>
-    )
-  }
-
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="flex items-center mb-8">
@@ -187,22 +328,22 @@ export default function CheckoutPage() {
                     required
                   />
                 </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <Label htmlFor="city">Ville *</Label>
-                    <Input
-                      id="city"
-                      value={personalInfo.city}
-                      onChange={(e) => handlePersonalInfoChange("city", e.target.value)}
-                      required
-                    />
-                  </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>
                     <Label htmlFor="postalCode">Code postal *</Label>
                     <Input
                       id="postalCode"
                       value={personalInfo.postalCode}
                       onChange={(e) => handlePersonalInfoChange("postalCode", e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div className="md:col-span-2">
+                    <Label htmlFor="city">Ville *</Label>
+                    <Input
+                      id="city"
+                      value={personalInfo.city}
+                      onChange={(e) => handlePersonalInfoChange("city", e.target.value)}
                       required
                     />
                   </div>
@@ -220,24 +361,37 @@ export default function CheckoutPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <RadioGroup value={shippingMethod} onValueChange={setShippingMethod}>
-                  <div className="flex items-center space-x-2 p-4 border rounded-lg">
-                    <RadioGroupItem value="standard" id="standard" />
-                    <Label htmlFor="standard" className="flex-1 cursor-pointer">
-                      <div className="flex justify-between items-center">
-                        <div>
-                          <p className="font-semibold">Livraison standard</p>
-                          <p className="text-sm text-gray-600">2-3 jours ouvrés</p>
+                {data?.eligibleShippingMethods && data.eligibleShippingMethods.length > 0 ? (
+                  <div>
+                    <p className="mb-4 text-sm text-gray-600">
+                      Sélectionnez une méthode de livraison (optionnel)
+                    </p>
+                    <RadioGroup
+                      value={shippingMethod || ""}
+                      onValueChange={setShippingMethod}
+                    >
+                      {data.eligibleShippingMethods.map((method) => (
+                        <div key={method.id} className="flex items-center space-x-2 p-4 border rounded-lg mb-2">
+                          <RadioGroupItem value={method.id} id={method.id} />
+                          <Label htmlFor={method.id} className="flex-1 cursor-pointer">
+                            <div className="flex justify-between items-center">
+                              <div>
+                                <p className="font-semibold">{method.name}</p>
+                                <p className="text-sm text-gray-600">{method.description}</p>
+                              </div>
+                              <span className="font-semibold">
+                                {(method.priceWithTax / 100).toFixed(2)} €
+                              </span>
+                            </div>
+                          </Label>
                         </div>
-                        <span className="font-semibold">{getTotalPrice() >= 50 ? "Gratuit" : "4,99 €"}</span>
-                      </div>
-                    </Label>
+                      ))}
+                    </RadioGroup>
                   </div>
-                </RadioGroup>
-
-                {getTotalPrice() < 50 && (
-                  <p className="text-sm text-gray-600 mt-4 p-3 bg-blue-50 rounded">
-                    💡 Ajoutez {(50 - getTotalPrice()).toFixed(2)} € pour bénéficier de la livraison gratuite !
+                ) : (
+                  <p className="text-yellow-600 p-4 bg-yellow-50 rounded-lg">
+                    Aucune méthode de livraison disponible pour votre commande.
+                    Vous pouvez continuer sans sélectionner de méthode de livraison.
                   </p>
                 )}
               </CardContent>
@@ -254,24 +408,47 @@ export default function CheckoutPage() {
               </CardHeader>
               <CardContent>
                 <div className="p-6 border rounded-lg bg-gray-50">
-                  <h3 className="font-semibold mb-2">Paiement simulé</h3>
-                  <p className="text-sm text-gray-600 mb-4">
-                    Dans un environnement réel, vous saisiriez ici vos informations de carte bancaire.
+                  <h3 className="font-semibold mb-4">Paiement par carte bancaire</h3>
+                  <p className="text-sm text-gray-600 mb-6">
+                    Nous utilisons le dummy payment handler de Vendure pour simuler le paiement.
                   </p>
-                  <div className="space-y-3">
+
+                  <div className="space-y-4">
                     <div>
-                      <Label>Numéro de carte</Label>
-                      <Input placeholder="**** **** **** 1234" disabled />
+                      <Label htmlFor="cardNumber">Numéro de carte</Label>
+                      <Input
+                        id="cardNumber"
+                        placeholder="4242 4242 4242 4242"
+                        defaultValue="4242 4242 4242 4242"
+                      />
                     </div>
-                    <div className="grid grid-cols-2 gap-3">
+
+                    <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <Label>Date d'expiration</Label>
-                        <Input placeholder="MM/AA" disabled />
+                        <Label htmlFor="expiry">Date d'expiration</Label>
+                        <Input
+                          id="expiry"
+                          placeholder="MM/AA"
+                          defaultValue="12/30"
+                        />
                       </div>
                       <div>
-                        <Label>CVV</Label>
-                        <Input placeholder="123" disabled />
+                        <Label htmlFor="cvv">CVV</Label>
+                        <Input
+                          id="cvv"
+                          placeholder="123"
+                          defaultValue="123"
+                        />
                       </div>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="cardName">Nom sur la carte</Label>
+                      <Input
+                        id="cardName"
+                        placeholder="NOM PRÉNOM"
+                        defaultValue={`${personalInfo.firstName} ${personalInfo.lastName}`.toUpperCase()}
+                      />
                     </div>
                   </div>
                 </div>
@@ -298,12 +475,21 @@ export default function CheckoutPage() {
                   </p>
                 </div>
 
+                <div>
+                  <h3 className="font-semibold mb-2">Méthode de livraison</h3>
+                  <p className="text-sm text-gray-600">
+                    {shippingMethod
+                      ? data?.eligibleShippingMethods?.find(m => m.id === shippingMethod)?.name || "Méthode sélectionnée"
+                      : "Non spécifiée"}
+                  </p>
+                </div>
+
                 <Separator />
 
                 <div>
                   <h3 className="font-semibold mb-2">Articles commandés</h3>
                   {items.map((item) => (
-                    <div key={item.product.id} className="flex justify-between py-2">
+                    <div key={`${item.product.id}-${item.variantId}`} className="flex justify-between py-2">
                       <span>
                         {item.product.name} x{item.quantity}
                       </span>
@@ -329,7 +515,7 @@ export default function CheckoutPage() {
               </Button>
             ) : (
               <Button onClick={handlePayment} className="bg-green-600 hover:bg-green-700">
-                Confirmer et payer
+                Confirmer et payer {(totalWithShipping).toFixed(2)} €
               </Button>
             )}
           </div>
@@ -343,7 +529,7 @@ export default function CheckoutPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               {items.map((item) => (
-                <div key={item.product.id} className="flex justify-between text-sm">
+                <div key={`${item.product.id}-${item.variantId}`} className="flex justify-between text-sm">
                   <span>
                     {item.product.name} x{item.quantity}
                   </span>
